@@ -4,6 +4,7 @@ export const runtime = "nodejs";
 import { notFound } from "next/navigation";
 import path from "path";
 import { promises as fs } from "fs";
+import CenterSelect from "@/app/components/centerSelect";
 import CenterInfo from "@/app/components/centerInfo";
 
 async function existsCenter(centerId: string) {
@@ -26,7 +27,6 @@ async function existsCenter(centerId: string) {
 export default async function Page({
   params,
 }: {
-  // Next.js 15 では params は Promise 型として渡されるため await が必要
   params: Promise<{ centerId: string }>;
 }) {
   const { centerId } = await params;
@@ -36,8 +36,8 @@ export default async function Page({
 
   return (
     <main className="p-6 space-y-6">
+      <CenterSelect />
       <CenterInfo centerId={centerId} />
-      {/* ここにアップロード/解析UIなどを追加 */}
     </main>
   );
 }
