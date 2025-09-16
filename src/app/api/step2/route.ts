@@ -8,15 +8,33 @@ function sse(ev: string, data: unknown) {
   return `data: ${JSON.stringify({ event: ev, data })}\n\n`;
 }
 
+// ヘッダからメーカー列を推定
+function detectMakerColumn(headers: string[]): number {
+  const patterns = [/メーカー/, /ﾒｰｶｰ/, /メーカー名/];
+  for (let i = 0; i < headers.length; i++) {
+    const norm = (headers[i] || "").toString().replace(/[\s　]/g, "");
+    if (patterns.some((p) => p.test(norm))) return i;
+  }
+  return -1;
+}
+
+// シート名サニタイズ
+function sanitizeSheetTitle(t: string): string {
+  let v = (t || "")
+    .slice(0, 90)
+    .replace(/[\\/?*\[\]]/g, " ")
+    .trim();
+  if (!v) v = "(空)";
+  return v;
+}
+
 export async function POST(req: NextRequest) {
   const body = await req.json();
   const centerId: string = body.centerId || "default";
   const headers: string[] = body.headers || [];
   const rows: (string | number)[][] = body.rows || [];
-  // meta など将来利用
   const cfg = await loadCenterConfig(centerId);
-  // メーカー列推定: ヘッダに 'メーカー' を含む列 or 0番目
-  const makerColIdx = headers.findIndex((h) => /メーカー/.test(h)) ?? -1;
+  const makerColIdx = detectMakerColumn(headers);
 
   const stream = new ReadableStream({
     start(controller) {
@@ -26,44 +44,144 @@ export async function POST(req: NextRequest) {
       (async () => {
         try {
           send("dbg", `[STEP2] start center=${centerId} rows=${rows.length}`);
+          send("dbg", `[STEP2] makerColIdx=${makerColIdx}`);
           const sheets = getSheetsClient();
           const drive = getDriveClient();
-          // (1) 新規 Spreadsheet 作成 (テンプレ複製は後続タスク)
-          send("progress", { stage: "create_spreadsheet" });
+
+          // --- 作成戦略 ---
+          const templateSpreadsheetId = process.env.TEMPLATE_SPREADSHEET_ID;
+          const forceDrive = process.env.FORCE_DRIVE_SPREADSHEET_CREATE === "1";
           const title = `${cfg?.displayName || centerId}-出力-${new Date()
             .toISOString()
             .slice(0, 10)}`;
-          const created = await withBackoff(
-            () =>
-              sheets.spreadsheets.create({
-                requestBody: {
-                  properties: { title },
-                  sheets: [
-                    {
-                      properties: { title: "OCR出力" },
-                    },
-                  ],
-                },
-              }),
-            "sheets.create",
-            { log: (m) => send("dbg", m) }
-          );
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const spreadsheetId = (created as any).data.spreadsheetId as
-            | string
-            | undefined;
-          if (!spreadsheetId) throw new Error("create spreadsheet failed");
-          send("dbg", `[STEP2] spreadsheet created id=${spreadsheetId}`);
-          // (2) フォルダ移動 (親フォルダ指定) - 任意
-          const folderId = process.env.DRIVE_FOLDER_ID;
-          if (folderId) {
+          let spreadsheetId: string | undefined;
+
+          if (templateSpreadsheetId) {
+            send("progress", { stage: "copy_template" });
             try {
               // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-              // @ts-ignore googleapis 型詳細導入前の暫定 any
+              // @ts-ignore any (drive copy)
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const copyRes: any = await withBackoff(
+                () =>
+                  drive.files.copy({
+                    fileId: templateSpreadsheetId,
+                    requestBody: {
+                      name: title,
+                      parents: process.env.DRIVE_FOLDER_ID
+                        ? [process.env.DRIVE_FOLDER_ID]
+                        : undefined,
+                    },
+                    supportsAllDrives: true,
+                    fields: "id",
+                  }),
+                "drive.files.copy",
+                { log: (m) => send("dbg", m) }
+              );
+              spreadsheetId = copyRes?.data?.id;
+              send("dbg", `[STEP2] template copied id=${spreadsheetId}`);
+            } catch (e) {
+              send("dbg", `[TEMPLATE][ERROR] copy failed ${e}`);
+            }
+          }
+
+          if (!spreadsheetId && !forceDrive) {
+            send("progress", { stage: "sheets_create" });
+            try {
+              const created = await withBackoff(
+                () =>
+                  sheets.spreadsheets.create({
+                    requestBody: {
+                      properties: { title },
+                      sheets: [
+                        {
+                          properties: { title: "OCR出力" },
+                        },
+                      ],
+                    },
+                  }),
+                "sheets.create",
+                { log: (m) => send("dbg", m) }
+              );
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              spreadsheetId = (created as any).data.spreadsheetId as string;
+            } catch (e) {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const me: any = e;
+              const status = me?.response?.status || me?.code;
+              send(
+                "dbg",
+                `[STEP2] sheets.create failed status=${status} will fallback drive`
+              );
+              if (Number(status) !== 403) {
+                // 403 以外の失敗はそのまま扱い (最終 drive へ)
+              }
+            }
+          }
+
+          if (!spreadsheetId) {
+            send("progress", {
+              stage: forceDrive ? "drive_create(force)" : "drive_create",
+            });
+            try {
+              // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+              // @ts-ignore any before types
+              const fileRes = await drive.files.create({
+                requestBody: {
+                  name: title,
+                  mimeType: "application/vnd.google-apps.spreadsheet",
+                  parents: process.env.DRIVE_FOLDER_ID
+                    ? [process.env.DRIVE_FOLDER_ID]
+                    : undefined,
+                },
+                supportsAllDrives: true,
+                fields: "id",
+              });
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              spreadsheetId = (fileRes as any).data.id as string;
+              send("dbg", `[STEP2] drive.files.create id=${spreadsheetId}`);
+              // rename 初期シート
+              try {
+                await withBackoff(
+                  () =>
+                    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+                    // @ts-ignore any
+                    sheets.spreadsheets.batchUpdate({
+                      spreadsheetId,
+                      requestBody: {
+                        requests: [
+                          {
+                            updateSheetProperties: {
+                              properties: { sheetId: 0, title: "OCR出力" },
+                              fields: "title",
+                            },
+                          },
+                        ],
+                      },
+                    }),
+                  "sheets.batchUpdate.rename",
+                  { log: (m) => send("dbg", m) }
+                );
+              } catch (re) {
+                send("dbg", `[WARN] rename initial sheet failed ${re}`);
+              }
+            } catch (fe) {
+              send("dbg", `[FALLBACK-FAIL] drive.files.create ${fe}`);
+              throw fe;
+            }
+          }
+
+          if (!spreadsheetId) throw new Error("create spreadsheet failed");
+          send("dbg", `[STEP2] spreadsheet created id=${spreadsheetId}`);
+
+          // (2) フォルダ移動 (コピー時点で親指定していない場合のみ)
+          const folderId = process.env.DRIVE_FOLDER_ID;
+          if (folderId && !templateSpreadsheetId) {
+            try {
+              // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+              // @ts-ignore any
               await withBackoff(
                 () =>
-                  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-                  // @ts-ignore 型補完前暫定
                   drive.files.update({
                     fileId: spreadsheetId,
                     addParents: folderId,
@@ -77,14 +195,16 @@ export async function POST(req: NextRequest) {
               send("dbg", `[WARN] move folder failed ${e}`);
             }
           }
-          // (3) ヘッダ + データ書き込み (後続タスクで詳細)
+
+          // (3) ヘッダ + データ書き込み (テンプレに既存シートがあれば 'OCR出力' を利用 / 無い場合既定シート)
+          const baseSheetTitle = "OCR出力";
           send("progress", { stage: "write_headers" });
           if (headers.length) {
             await withBackoff(
               () =>
                 sheets.spreadsheets.values.update({
                   spreadsheetId,
-                  range: `OCR出力!A1:${String.fromCharCode(
+                  range: `${baseSheetTitle}!A1:${String.fromCharCode(
                     65 + headers.length - 1
                   )}1`,
                   valueInputOption: "RAW",
@@ -100,7 +220,7 @@ export async function POST(req: NextRequest) {
               () =>
                 sheets.spreadsheets.values.update({
                   spreadsheetId,
-                  range: `OCR出力!A2`,
+                  range: `${baseSheetTitle}!A2`,
                   valueInputOption: "RAW",
                   requestBody: { values: rows },
                 }),
@@ -109,7 +229,7 @@ export async function POST(req: NextRequest) {
             );
           }
 
-          // (4) メーカー別シート生成 (簡易グルーピング)
+          // (4) メーカー別シート
           try {
             if (headers.length && rows.length && makerColIdx >= 0) {
               send("progress", { stage: "group_rows" });
@@ -119,31 +239,28 @@ export async function POST(req: NextRequest) {
                 if (!groups.has(mk)) groups.set(mk, []);
                 groups.get(mk)!.push(r);
               }
-              // 既定シートの次に maker シートを append (batchUpdate)
-              // googleapis 型簡略化のため any キャスト
+              // addSheet リクエスト作成
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const requests: any[] = [];
+              const addRequests: any[] = [];
               groups.forEach((_rows, mk) => {
-                const title = mk.length > 90 ? mk.slice(0, 90) : mk;
-                requests.push({
-                  addSheet: { properties: { title } },
-                });
+                const title = sanitizeSheetTitle(mk);
+                addRequests.push({ addSheet: { properties: { title } } });
               });
-              if (requests.length) {
+              if (addRequests.length) {
                 await withBackoff(
                   () =>
-                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                    (sheets.spreadsheets.batchUpdate as any)({
+                    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+                    // @ts-ignore any
+                    sheets.spreadsheets.batchUpdate({
                       spreadsheetId,
-                      requestBody: { requests },
+                      requestBody: { requests: addRequests },
                     }),
                   "sheets.batchUpdate.addSheet",
                   { log: (m) => send("dbg", m) }
                 );
               }
-              // 各シートにヘッダ + 行書き込み
-              for (const [mk, mRows] of groups.entries()) {
-                const title = mk.length > 90 ? mk.slice(0, 90) : mk;
+              for (const [mk, gRows] of groups.entries()) {
+                const title = sanitizeSheetTitle(mk);
                 send("progress", { stage: `maker_sheet:${title}` });
                 if (headers.length) {
                   await withBackoff(
@@ -160,14 +277,14 @@ export async function POST(req: NextRequest) {
                     { log: (m) => send("dbg", m) }
                   );
                 }
-                if (mRows.length) {
+                if (gRows.length) {
                   await withBackoff(
                     () =>
                       sheets.spreadsheets.values.update({
                         spreadsheetId,
                         range: `${title}!A2`,
                         valueInputOption: "RAW",
-                        requestBody: { values: mRows },
+                        requestBody: { values: gRows },
                       }),
                     "values.update.maker.rows",
                     { log: (m) => send("dbg", m) }
@@ -184,16 +301,63 @@ export async function POST(req: NextRequest) {
           } catch (e) {
             send("dbg", `[WARN] maker sheet generation failed ${e}`);
           }
+
           send("progress", { stage: "finalize" });
           send(
             "dbg",
             `[STEP2] values written headers=${headers.length} rows=${rows.length}`
           );
-          const finalUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`;
-          send("final_url", { name: title, url: finalUrl });
+          send("final_url", {
+            name: title,
+            url: `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`,
+          });
           send("dbg", "[STEP2] done");
         } catch (e) {
-          send("dbg", `[FATAL][STEP2] ${e}`);
+          interface MaybeErr {
+            message?: string;
+            code?: string | number;
+            response?: { status?: number; data?: unknown };
+          }
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const me: MaybeErr = e as any;
+          const status = (me.response?.status || me.code) as
+            | number
+            | string
+            | undefined;
+          const msg = me.message || String(e);
+          let category = "unknown";
+          const suggestions: string[] = [];
+          if (status === 401) {
+            category = "unauthenticated";
+            suggestions.push(
+              "SERVICE_ACCOUNT / PRIVATE_KEY 読み込み確認 (.env 再起動)",
+              "秘密鍵改行が \\n でエスケープされているか",
+              "サービスアカウント鍵が削除されていないか"
+            );
+          } else if (Number(status) === 403) {
+            category = "forbidden";
+            suggestions.push(
+              "Sheets / Drive API 有効化",
+              "DRIVE_FOLDER_ID の共有設定 (閲覧以上)",
+              "共有ドライブならメンバー追加",
+              "一旦 DRIVE_FOLDER_ID 外して動作確認",
+              "組織ポリシー(外部共有禁止等)確認"
+            );
+          } else {
+            suggestions.push(
+              "再実行 (一時的エラー)",
+              "API クォータ状況確認",
+              "サーバーログで詳細スタック確認"
+            );
+          }
+          send("error", {
+            step: "step2",
+            message: msg,
+            status,
+            category,
+            suggestions,
+          });
+          send("dbg", `[FATAL][STEP2] status=${status} ${msg}`);
         } finally {
           send("done", "ステップ2完了");
           controller.close();
