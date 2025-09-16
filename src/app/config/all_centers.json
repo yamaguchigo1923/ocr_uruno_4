@@ -1,0 +1,29 @@
+[
+  { "id": "mito", "displayName": "水戸市立学校給食共同調理場" },
+
+  { "id": "johoku", "displayName": "常北学校給食センター" },
+  { "id": "omiya", "displayName": "大宮市立大宮学校給食センター" },
+  { "id": "daigo", "displayName": "大子町立学校給食センター" },
+
+  { "id": "ibaraki", "displayName": "茨城町学校給食共同調理" },
+  { "id": "omitama", "displayName": "小美玉学校給食センター" },
+  { "id": "ishioka", "displayName": "石岡学校給食センター" },
+  { "id": "yasato", "displayName": "八郷学校給食センター" },
+
+  { "id": "kasama-iwama", "displayName": "笠間・岩間学校給食センター" },
+
+  { "id": "kashima", "displayName": "鹿嶋学校給食センター" },
+  { "id": "kamisu", "displayName": "神栖学校給食共同調理" },
+  { "id": "itako", "displayName": "潮来学校給食センター" },
+  { "id": "hokota", "displayName": "鉾田学校給食センター" },
+  { "id": "kitaura-aso", "displayName": "北浦・麻生学校給食センター" },
+
+  { "id": "hitachinaka", "displayName": "ひたちなか市C・単独校" },
+  { "id": "tokai", "displayName": "東海村単独校" },
+
+  { "id": "takahagi", "displayName": "高萩学校給食センター" },
+  { "id": "ota", "displayName": "太田学校給食センター" },
+  { "id": "naka", "displayName": "那珂市学校給食センター" },
+  { "id": "kitaibaraki", "displayName": "北茨城学校給食センター" },
+  { "id": "kita-minamitakano", "displayName": "北部・南高野調理場" }
+]

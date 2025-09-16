@@ -1,0 +1,35 @@
+{
+  "id": "ishioka",
+  "displayName": "石岡学校給食センター",
+  "templateSpreadsheetId": "1rzgCr2p1uIFiEhy_CxlGOYBPCLyhyXfy",
+  "templateSheetId": 1557733602,
+  "exportStartRow": 32,
+  "coverPages": 1,
+  "poll": {
+    "startCol": "B",
+    "endCol": "K",
+    "readyColRelativeIndex": 0,
+    "minReadyRatio": 0.95,
+    "maxWaitSec": 600
+  },
+  "headers": {
+    "judgeCandidates": [
+      "銘柄·条件",
+      "銘柄・条件",
+      "銘柄条件"
+    ],
+    "fallbackChars": "銘柄条件",
+    "needColumns": [
+      "成分表",
+      "見本"
+    ]
+  },
+  "ranges": {
+    "catalog": "'商品'!A10:H30000",
+    "export": {
+      "makerHeader": "B4:E4",
+      "centerName": "B27:E27",
+      "month": "F27"
+    }
+  }
+}
